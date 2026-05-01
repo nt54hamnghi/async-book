@@ -73,11 +73,11 @@ Within an async function, code is executed in the usual, sequential way[^preempt
 
 We stated above that a future is a computation that will be ready at some point in the future. To get the result of that computation, we use the `await` keyword. If the result is ready immediately or can be computed without waiting, then `await` simply does that computation to produce the result. However, if the result is not ready, then `await` hands control over to the scheduler so that another task can proceed (this is cooperative multitasking mentioned in the previous chapter).
 
-If you're coming from Python or JavaScript, you may be used to writing `await` before an expression, such as `await some_function()`. This is known as a prefix operator. In Rust, however, the syntax for using await is `some_future.await`, i.e., it is a postfix keyword used with the `.` operator. That means it can be used ergonomically in chains of method calls and field accesses.
+In Rust, the syntax for using await is `some_future.await`, i.e., it is a postfix keyword used with the `.` operator. That means it can be used ergonomically in chains of method calls and field accesses. This is in contrast to languages like Python or JavaScript, where `await` is a prefix operator placed before an expression, such as `await some_function()`.
 
-Suppose you're calling an async function that makes a network request and want to access the status code of the response. With the prefix `await` syntax, you would need to prepend `await` to `fetch()`, then wrap the expression in parentheses to access the status code, like `(await fetch()).status_code`. In Rust, you can simply write `fetch().await.status_code?`. This becomes especially helpful in longer chains. A prefix-style expression like `(await (await fetch()).json()).data` can make it hard to see what is being awaited. In Rust, the equivalent reads naturally as `fetch().await.json().await.data?`.
+To see why postfix await is often more ergonomic, suppose you're calling an async function that makes a network request and want to access the status code of the response. With the prefix `await` syntax, you would need to prepend `await` to `fetch()`, then wrap the expression in parentheses to access the status code, like `(await fetch()).status_code`. In Rust, you can write `fetch().await.status_code?`. This becomes especially helpful in longer chains. E.g., an expression with two prefix awaits looks like `(await (await fetch()).json()).data`, whereas the Rust equivalent is `fetch().await.json().await.data?`, which reads more naturally.
 
-Now let's look at how `async` and `await` actually behave. Consider the following functions:
+Now let's look at how `async` and `await` in practice. Consider the following functions:
 
 ```rust,norun
 // An async function, but it doesn't need to wait for anything.
