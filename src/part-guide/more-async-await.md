@@ -133,13 +133,77 @@ A function which returns an async block is pretty similar to an async function. 
 
 You would usually prefer the async function version since it is simpler and clearer. However, the async block version is more flexible since you can execute some code when the function is called (by writing it outside the async block) and some code when the result is awaited (the code inside the async block).
 
-
 ## Async closures
 
-- closures
-  - coming soon (https://github.com/rust-lang/rust/pull/132706, https://blog.rust-lang.org/inside-rust/2024/08/09/async-closures-call-for-testing.html)
-  - async blocks in closures vs async closures
+If a closure needs to await an async operation in its body, it has to return a future (just like async functions). A simple way is to return an async block from the closure, e.g., `|| async {}`. This often works if the returned future doesn't reference data that the closure captures. For example:
 
+```rust,norun
+#[tokio::main]
+async fn main() {
+    let mut logs = Vec::new();
+    run(|data| {
+        logs.push(format!("Received: {data}"));
+        async {
+            // do some asynchronous operations
+        }
+    });
+}
+
+async fn run<F, Fut>(f: F)
+where
+    F: FnMut(&str) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    todo!()
+}
+```
+
+We pass a closure that returns an async block to `run`. The closure records a log message before performing any asynchronous operations inside the async block. However, if the log line can only be produced by an async function call, that call has to happen inside the async block too, which means `logs.push` must be placed there as well.
+
+```rust,norun
+#[tokio::main]
+async fn main() {
+    let mut logs = Vec::new();
+    run(|data| async {
+        let msg = get_message(data).await;
+        logs.push(msg.clone());
+    });
+}
+
+async fn get_message(data: &str) -> String {
+    todo!()
+}
+```
+
+This example won't compile. The problem is that `data` and `logs` are captured by the closure and only available during the execution of the closure, but the returned future needs to reference these captures when it is later awaited, which means it requires the captured values to outlive the closure.
+
+The second limitation appears when Higher-Ranked Trait Bounds (HRTBs) are involved in expressing the signatures of higher-ranked async functions. To illustrate this, the bound on `F` has changed to `for<'a> FnMut(&'a str) -> Fut`. It means that for all lifetimes `'a`, `F` is a closure accepting a `&str` that lives for `'a`, and `F` is said to be higher-ranked over the lifetime of its input.
+
+```rust,norun
+#[tokio::main]
+async fn main() {
+    run(do_something);
+}
+
+async fn do_something(s: &str) {}
+
+async fn run<F, Fut>(f: F)
+where
+    F: for<'a> FnMut(&'a str) -> Fut, 
+    // ^------       ^--
+    // HRTB used here
+    Fut: Future<Output = ()>,
+{
+    todo!()
+}
+```
+
+This code will fail to compile. In `main`, `Fut` is inferred to be the future produced by `do_something`, which must capture the lifetime of its `s: &str` input to use it, but `for<'a>` requires `F` to work for any lifetime, not just the one tied to that particular input. Since `'a` in the HRTB is not a generic parameter, it cannot be named in the bound for `Fut`, so there's no way to express that `Fut` may capture this lifetime.
+
+As we have seen, and to quote [the RFC for async closures](https://rust-lang.github.io/rfcs/3668-async-closures.html#motivation), two major limitations when using closures in async code includes:
+
+> 1. That closures cannot return futures that borrow from the closure captures.
+> 2. The inability to express higher-ranked async function signatures.
 
 ## Lifetimes and borrowing
 
