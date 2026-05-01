@@ -112,10 +112,11 @@ use tokio;
 async fn main() {
     let contents = tokio::task::spawn_blocking(|| {
 		std::fs::read_to_string("file.txt").unwrap()
-	    println!("{contents}");
     })
 	.await
 	.unwrap();
+
+	// do something with contents
 }
 ```
 
@@ -123,38 +124,37 @@ Because tasks spawned with `spawn_blocking` cannot be aborted, it is intended fo
 
 If you need to run a lot of tasks, you'll probably need some kind of thread pool or work scheduler. If you keep spawning threads and have many more than there are cores available, you'll end up sacrificing throughput. [Rayon](https://github.com/rayon-rs/rayon) is a popular choice which makes it easy to run and manage parallel tasks. You might get better performance with something which is more specific to your workload and/or has some knowledge of the tasks being run.
 
-Here is an example of using Rayon together with Tokio. It utilizes [`tokio::oneshot::channel`](https://docs.rs/tokio/latest/tokio/sync/oneshot/fn.channel.html) to communicate results between a task spawned by Rayon and the current task in Tokio. 
+Here is an example of using Rayon together with Tokio. It utilizes [`tokio::oneshot::channel`](https://docs.rs/tokio/latest/tokio/sync/oneshot/fn.channel.html) to communicate results between a task spawned by Rayon and the current task in Tokio.
 
 ```rust,norun
 use rayon::prelude::*;
 
 #[tokio::main]
 async fn main() {
-    let data = 0..10;
+    let data = 1..=10;
 
     let (send, recv) = tokio::sync::oneshot::channel();
-    
     // Spawn a task on rayon to avoid blocking the current task
-    rayon::spawn(move || {
+    std::thread::spawn(move || {
         // Use rayon's parallel iterators to compute the results in parallel
         let results = data.into_par_iter().map(compute).collect::<Vec<_>>();
         // Send the result back to Tokio.
-        send.send(results).expect("Failed to send results to Tokio");
+        send.send(results).unwrap();
     });
 
-    // Wait for the rayon task and get the result
-    let results = recv.await.expect("Panic in rayon::spawn");
+    // Wait for the rayon task and get the results
+    let results = recv.await.unwrap();
     println!("Results: {:?}", results);
 }
 
-fn compute(input: usize) -> usize {
+fn compute(input: u64) -> u64 {
     // Simulate a CPU-intensive computation by
     // summing up a large number of integers.
     let mut sum = 0u64;
     for i in 0..100_000_000 {
         sum = sum.wrapping_add(i * i);
     }
-    input * 42
+    sum % input
 }
 ```
 
