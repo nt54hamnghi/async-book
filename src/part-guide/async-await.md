@@ -59,7 +59,7 @@ From here on in, I'm going to try to be precise about the terminology around tas
 An async task in Rust is just a future (usually a 'big' future made by combining many others). In other words, a task is a future which is executed. However, there are times when a future is 'executed' without being a runtime's task. This kind of a future is intuitively a *task* but not a *runtime's task*. I'll spell this out more when we get to an example of it.
 
 
-## Async functions 
+## Async functions
 
 The `async` keyword is a modifier on function declarations. E.g., we can write `pub async fn send_to_server(...)`. An async function is simply a function declared using the `async` keyword, and what that means is that it is a function which can be executed asynchronously, in other words the caller *can choose not to* wait for the function to complete before doing something else.
 
@@ -73,9 +73,11 @@ Within an async function, code is executed in the usual, sequential way[^preempt
 
 We stated above that a future is a computation that will be ready at some point in the future. To get the result of that computation, we use the `await` keyword. If the result is ready immediately or can be computed without waiting, then `await` simply does that computation to produce the result. However, if the result is not ready, then `await` hands control over to the scheduler so that another task can proceed (this is cooperative multitasking mentioned in the previous chapter).
 
-The syntax for using await is `some_future.await`, i.e., it is a postfix keyword used with the `.` operator. That means it can be used ergonomically in chains of method calls and field accesses.
+In Rust, the syntax for using await is `some_future.await`, i.e., it is a postfix keyword used with the `.` operator. That means it can be used ergonomically in chains of method calls and field accesses. This is in contrast to languages like Python or JavaScript, where `await` is a prefix operator placed before an expression, such as `await some_function()`.
 
-Consider the following functions:
+To see why postfix await is often more ergonomic, suppose you're calling an async function that makes a network request and want to access the status code of the response. With the prefix `await` syntax, you would need to prepend `await` to `fetch()`, then wrap the expression in parentheses to propagate errors with `?`, and then access the status code, like `(await fetch())?.status_code`. In postfix syntax, you can write `fetch().await?.status_code`. This becomes especially helpful in longer chains. E.g., an expression with two prefix awaits looks like `(await (await fetch())?.json())?.data`, whereas the postfix equivalent is `fetch().await?.json().await?.data`, which reads more naturally.
+
+Now let's look at how `async` and `await` in practice. Consider the following functions:
 
 ```rust,norun
 // An async function, but it doesn't need to wait for anything.
