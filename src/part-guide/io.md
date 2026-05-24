@@ -101,11 +101,64 @@ For the rest of this section, we'll assume you have a mix of latency-sensitive t
 
 There are essentially three solutions for running long-running or blocking tasks: use a runtime's built-in facilities, use a separate thread, or use a separate runtime.
 
-In Tokio, you can use [`spawn_blocking`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html) to spawn a task which might block. This works like `spawn` for spawning a task, but runs the task in a separate thread pool which is optimized for tasks which might block (the task will likely run on it's own thread). Note that this runs regular synchronous code, not an async task. That means that the task can't be cancelled (even though it's `JoinHandle` has an `abort` method). Other runtimes provide similar functionality.
+In Tokio, you can use [`spawn_blocking`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html) to spawn a task which might block. This works like [`spawn`](https://docs.rs/tokio/latest/tokio/task/fn.spawn.html) for spawning a task, but runs the task in a separate thread pool which is optimized for tasks which might block (the task will likely run on it's own thread). Note that this runs regular synchronous code, not an async task. That means that the task can't be cancelled (even though its `JoinHandle` has an `abort` method). Other runtimes provide similar functionality.
 
-You can spawn a thread to do the blocking work using [`std::thread::spawn`](https://doc.rust-lang.org/stable/std/thread/fn.spawn.html) (or similar functions). This is pretty straightforward. If you need to run a lot of tasks, you'll probably need some kind of thread pool or work scheduler. If you keep spawning threads and have many more than there are cores available, you'll end up sacrificing throughput. [Rayon](https://github.com/rayon-rs/rayon) is a popular choice which makes it easy to run and manage parallel tasks. You might get better performance with something which is more specific to your workload and/or has some knowledge of the tasks being run.
+This example uses `spawn_blocking` to perform blocking I/O by calling a synchronous filesystem function from the standard library. Note that [`tokio::fs`](https://docs.rs/tokio/latest/tokio/fs/index.html) also exists and provides asynchronous filesystem APIs; however, under the hood it too uses blocking operations wrapped in `spawn_blocking`.
 
-You can use a separate instances of the async runtime for latency-sensitive tasks and for long-running tasks. This is suitable for CPU-bound tasks, but you still shouldn't use blocking IO, even on the runtime for long-running tasks. For CPU-bound tasks, this is a good solution in that it is the only one which supports the long-running tasks be async tasks. It is also flexible (since the runtimes can be configured to be optimal for the kind of task they're running; indeed, it is necessary to put some effort into runtime configuration to get optimal performance) and lets you benefit from using mature, well-engineered sub-systems like Tokio. You can even use two different async runtimes. In any case, the runtimes must be run on different threads.
+```rust,norun
+use tokio;
+
+#[tokio::main]
+async fn main() {
+    let contents = tokio::task::spawn_blocking(|| {
+		std::fs::read_to_string("file.txt").unwrap()
+    })
+	.await
+	.unwrap();
+
+	// do something with contents
+}
+```
+
+Because tasks spawned with `spawn_blocking` cannot be aborted, it is intended for work that eventually completes. Tasks that may block indefinitely, such as a server listening for incoming requests, are better run on a dedicated thread so they do not occupy a thread from Tokio's blocking thread pool for an extended period. You can create one with [`std::thread::spawn`](https://doc.rust-lang.org/stable/std/thread/fn.spawn.html) or a similar API.
+
+If you need to run a lot of tasks, you'll probably need some kind of thread pool or work scheduler. If you keep spawning threads and have many more than there are cores available, you'll end up sacrificing throughput. [Rayon](https://github.com/rayon-rs/rayon) is a popular choice which makes it easy to run and manage parallel tasks. You might get better performance with something which is more specific to your workload and/or has some knowledge of the tasks being run.
+
+Here is an example of using Rayon together with Tokio. It utilizes [`tokio::oneshot::channel`](https://docs.rs/tokio/latest/tokio/sync/oneshot/fn.channel.html) to communicate results between a task spawned by Rayon and the current task in Tokio.
+
+```rust,norun
+use rayon::prelude::*;
+
+#[tokio::main]
+async fn main() {
+    let data = 1..=10;
+
+    let (send, recv) = tokio::sync::oneshot::channel();
+    // Spawn a task on rayon to avoid blocking the current task
+    std::thread::spawn(move || {
+        // Use rayon's parallel iterators to compute the results in parallel
+        let results = data.into_par_iter().map(compute).collect::<Vec<_>>();
+        // Send the result back to Tokio.
+        send.send(results).unwrap();
+    });
+
+    // Wait for the rayon task and get the results
+    let results = recv.await.unwrap();
+    println!("Results: {:?}", results);
+}
+
+fn compute(input: u64) -> u64 {
+    // Simulate a CPU-intensive computation by
+    // summing up a large number of integers.
+    let mut sum = 0u64;
+    for i in 0..100_000_000 {
+        sum = sum.wrapping_add(i * i);
+    }
+    sum % input
+}
+```
+
+You can use a separate instance of the async runtime for latency-sensitive tasks and for long-running tasks. This is suitable for CPU-bound tasks, but you still shouldn't use blocking IO, even on the runtime for long-running tasks. For CPU-bound tasks, this is a good solution in that it is the only one which supports the long-running tasks be async tasks. It is also flexible (since the runtimes can be configured to be optimal for the kind of task they're running; indeed, it is necessary to put some effort into runtime configuration to get optimal performance) and lets you benefit from using mature, well-engineered sub-systems like Tokio. You can even use two different async runtimes. In any case, the runtimes must be run on different threads.
 
 On the other hand, you do need to do a bit more thinking: you must ensure that you are running tasks on the right runtime (which can be harder than it sounds) and communication between tasks can be complicated. We'll discuss synchronisation between sync and async contexts next, but it can be even trickier between multiple async runtimes. Each runtime is it's own little universe of tasks and the schedulers are totally independent. Tokio channels and locks *can* be used from different runtimes (even non-Tokio ones), but other runtimes' primitives may not work in this way.
 
