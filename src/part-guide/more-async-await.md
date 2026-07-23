@@ -135,49 +135,95 @@ You would usually prefer the async function version since it is simpler and clea
 
 ## Async closures
 
-If a closure needs to await an async operation in its body, it has to return a future (just like async functions). A simple way is to return an async block from the closure, e.g., `|| async {}`. This often works if the returned future doesn't reference data that the closure captures. For example:
+If a closure needs to await an async operation in its body, it has to return a future (just like any async functions). A simple way is to return an async block, like `|| async {}`. This often works if the returned future doesn't reference data that the closure captures. For example:
 
 ```rust,norun
 #[tokio::main]
 async fn main() {
-    let mut logs = Vec::new();
-    run(|data| {
-        logs.push(format!("Received: {data}"));
-        async {
-            // do some asynchronous operations
-        }
-    });
+    let mut logs: Vec<String> = vec![];
+
+    let f = || {
+        logs.push("".to_owned());
+        async {}
+    };
+}
+```
+
+The closure saves a log message before any asynchronous work inside the async block. However, if the log line can only be produced by an async function call, that call must happen inside the async block, thus requiring `logs.push` to be placed there as well.
+
+```rust,norun
+#[tokio::main]
+async fn main() {
+    let mut logs: Vec<String> = vec![];
+
+    let f = || async {
+        let msg = get_message().await;
+        logs.push(msg);
+    };
+    // error: captured variable cannot escape `FnMut` closure body
+}
+
+async fn get_message() -> String {
+    todo!()
+}
+```
+
+This example won't compile. The variable `logs` is captured by the closure and only available during its execution, but the returned future needs to reference this capture when it is later awaited, meaning the captured value has to outlive the closure for this to be valid.
+
+It is also not possible to express signature of higher-ranked async functions using Higher-Ranked Trait Bounds (HRTBs). 
+
+```rust,norun
+#[tokio::main]
+async fn main() {
+    run(do_something);
+    // error: implementation of `FnMut` is not general enough
 }
 
 async fn run<F, Fut>(f: F)
 where
-    F: FnMut(&str) -> Fut,
+    F: for<'a> FnMut(&'a str) -> Fut, 
     Fut: Future<Output = ()>,
-{
-    todo!()
-}
+{}
+
+async fn do_something(s: &str) {}
 ```
 
-We pass a closure that returns an async block to `run`. The closure records a log message before performing any asynchronous operations inside the async block. However, if the log line can only be produced by an async function call, that call has to happen inside the async block too, which means `logs.push` must be placed there as well.
+`F: for<'a> FnMut(&'a str) -> Fut` means for every lifetime `'a`, `F` is a closure that accepts a `&str` living for `'a`. In other words, `F` is higher-ranked over the lifetime of its input.
+
+This code fails to compile because the inferred type of `F` isn't general enough. In particular, `F`'s returned type `Fut` is inferred to be the future produced by `do_something` due to its use in `main`. That future must capture the lifetime of its `s: &str` input in order to use it, but `for<'a>` needs `F` to work for any lifetime, not just the one tied to that particular input. Moreover, since `'a` in the HRTB isn't a generic parameter, it can't be named in the bound on `Fut`, so there's no way to express that `Fut` may capture this lifetime.
+
+As we have seen, and to quote [the RFC for async closures](https://rust-lang.github.io/rfcs/3668-async-closures.html#motivation), two major limitations when using closures in async code includes:
+
+> 1. That closures cannot return futures that borrow from the closure captures.
+> 2. The inability to express higher-ranked async function signatures.
+
+Async closure support was added to address both of these problems. An async closure is declared by prefixing a closure with the `async` keyword, like `async || {}` (as opposed to `|| async {}`). Like regular closures, they can capture variables from their environment. However, async closures also return a value of an anonymous future type, which can itself can borrow data from the async closure.
 
 ```rust,norun
-#[tokio::main]
-async fn main() {
-    let mut logs = Vec::new();
-    run(|data| async {
-        let msg = get_message(data).await;
-        logs.push(msg.clone());
-    });
-}
+let mut logs: Vec<String> = vec![];
 
-async fn get_message(data: &str) -> String {
-    todo!()
-}
+let f = async || {
+	//  ^-------
+	let msg = get_message().await;
+	logs.push(msg);
+};
 ```
 
-This example won't compile. The problem is that `data` and `logs` are captured by the closure and only available during the execution of the closure, but the returned future needs to reference these captures when it is later awaited, which means it requires the captured values to outlive the closure.
+Any variables `f` captures live until it is dropped. Calling `f` returns a future that borrows the closure and its captures until the future is dropped. An `move` async closure owns the its captured data. Below, `f` takes ownership of `logs`, and calls to `f` gives back a future that borrow `f` and its owned data.
 
-The second limitation appears when Higher-Ranked Trait Bounds (HRTBs) are involved in expressing the signatures of higher-ranked async functions. To illustrate this, the bound on `F` has changed to `for<'a> FnMut(&'a str) -> Fut`. It means that for all lifetimes `'a`, `F` is a closure accepting a `&str` that lives for `'a`, and `F` is said to be higher-ranked over the lifetime of its input.
+```rust,norun
+let mut logs: Vec<String> = vec![];
+
+let f = async move || {
+	//        ^---
+	let msg = get_message().await;
+	logs.push(msg);
+};
+```
+
+The standard library also provides [`AsyncFnOnce`](https://doc.rust-lang.org/std/ops/trait.AsyncFnOnce.html), [`AsyncFnMut`](https://doc.rust-lang.org/std/ops/trait.AsyncFnMut.html), and [`AsyncFn`](https://doc.rust-lang.org/std/ops/trait.AsyncFn.html) traits, similar to the `Fn` family of traits. You can use these traits to express trait bounds as they relate to async closures.
+
+For instance, we can use `AsyncFnMut` to bound the generic type `F` of the `run` function. It compiles successfully because async closures can be higher-ranked over their argument lifetimes.
 
 ```rust,norun
 #[tokio::main]
@@ -185,25 +231,34 @@ async fn main() {
     run(do_something);
 }
 
-async fn do_something(s: &str) {}
-
-async fn run<F, Fut>(f: F)
+async fn run<F>(f: F)
 where
-    F: for<'a> FnMut(&'a str) -> Fut, 
-    // ^------       ^--
-    // HRTB used here
-    Fut: Future<Output = ()>,
-{
-    todo!()
-}
+    F: for<'a> AsyncFnMut(&'a str),
+{}
+
+async fn do_something(s: &str) {};
 ```
 
-This code will fail to compile. In `main`, `Fut` is inferred to be the future produced by `do_something`, which must capture the lifetime of its `s: &str` input to use it, but `for<'a>` requires `F` to work for any lifetime, not just the one tied to that particular input. Since `'a` in the HRTB is not a generic parameter, it cannot be named in the bound for `Fut`, so there's no way to express that `Fut` may capture this lifetime.
+It's worth understanding how each trait handles the closure's captures differently. Calling an `AsyncFn` or `AsyncFnMut` closure only needs a reference (shared or exclusive, respectively) to the closure itself, so the returned future can still borrow from the closure's data. Invoking an `AsyncFnOnce` closure, however, consumes it, so the closure value no longer exists for the resulting future to borrow from. As a result, Rust generates a new future type, and the captures are moved into this future instead. This new future behaves the same way it would if it were called by reference.
 
-As we have seen, and to quote [the RFC for async closures](https://rust-lang.github.io/rfcs/3668-async-closures.html#motivation), two major limitations when using closures in async code includes:
+To ensure compatibility with other callable types, `AsyncFn*() -> T` is automatically implemented for any type that implements `Fn*() -> Fut`, where `Fut: Future<Output = T>`.
 
-> 1. That closures cannot return futures that borrow from the closure captures.
-> 2. The inability to express higher-ranked async function signatures.
+```rust,norun
+#[tokio::main]
+async fn main() {
+    accept_async_fn(async || {});
+    accept_async_fn(|| async {});
+    accept_async_fn(foo);
+    accept_async_fn(|| Box::pin(async {}));
+    accept_async_fn(Box::new(|| Box::pin(async {})));
+}
+
+async fn foo() {}
+
+fn accept_async_fn(f: impl AsyncFn()) {}
+```
+
+ 
 
 ## Lifetimes and borrowing
 
